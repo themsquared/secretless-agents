@@ -1,0 +1,93 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# agentgateway v1.5.0 standalone. Two credential boundaries in one config:
+#
+#   inbound   agents present a 60-second identity JWT from the issuer.
+#             jwtAuth mode strict rejects anything unsigned or expired,
+#             and the authorization rules decide what each team may call.
+#
+#   outbound  the gateway attaches the provider credential. One model uses
+#             the long-lived key, the other has agentgateway mint a fresh
+#             signed JWT per request. Neither ever reaches the agent.
+
+config:
+  adminAddr: 0.0.0.0:15000
+
+gateways:
+  default:
+    port: 3300
+    listeners:
+    - name: llm
+
+llm:
+  gateways: default/llm
+
+  policies:
+    # Every request must carry a token this issuer signed. Without this the
+    # gateway would happily spend the provider key for anyone who can reach
+    # the port, which is the failure mode the whole demo is about.
+    jwtAuth:
+      mode: strict
+      issuer: "https://issuer.secretless.local"
+      audiences: ["agentgateway"]
+      jwks:
+        file: /keys/jwks.json
+
+    # Identity is not authorization. A valid token gets you to the gateway
+    # and no further; the per-model rules below decide what each team may
+    # actually call.
+    authorization:
+      rules:
+      - allow: 'has(jwt.team)'
+
+  providers:
+  # The classic case: a long-lived provider key, held by the gateway.
+  - name: static-key
+    provider:
+      custom:
+        formats:
+        - type: completions
+    params:
+      baseUrl: http://mock-llm:8088/static
+    defaults:
+      auth:
+        key: $UPSTREAM_API_KEY
+
+  # The better case: nothing long-lived exists on the wire at all. The
+  # gateway signs a short-lived JWT with its own private key on every
+  # request. A stolen upstream request is worth 60 seconds.
+  - name: signed-jwt
+    provider:
+      custom:
+        formats:
+        - type: completions
+    params:
+      baseUrl: http://mock-llm:8088/signed
+    defaults:
+      auth:
+        jwtSign:
+          signingKey:
+            file: /keys/gateway-sign.key
+          alg: RS256
+          ttl: 60s
+          claims:
+            iss: agentgateway
+            aud: mock-llm
+            sub: agentgateway/llm-egress
+
+  # Per-model authorization. The `llm` CEL object is not populated during
+  # the gateway-level authorization phase, so the model a request asked for
+  # is matched here rather than in a single top-level rule.
+  models:
+  - name: secretless-static
+    provider:
+      reference: static-key
+    authorization:
+      rules:
+      - allow: 'jwt.team in ["research", "platform"]'
+  - name: secretless-signed
+    provider:
+      reference: signed-jwt
+    authorization:
+      rules:
+      - allow: 'jwt.team == "platform"'

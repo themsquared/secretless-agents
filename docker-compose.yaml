@@ -1,0 +1,71 @@
+# The whole point of this file is what each service is allowed to know.
+#
+#   agent       no secrets at all, by design
+#   issuer      a signing key for identity tokens, no provider credential
+#   agentgateway the provider key and the upstream signing key, and nothing else
+#   mock-llm    the provider key, because it is the provider
+
+services:
+  # One-shot: generates the two keypairs and the JWKS into ./keys.
+  keygen:
+    build: ./python-tools
+    image: secretless-tools
+    command: ["python3", "/app/keygen.py"]
+    volumes:
+      - ./keys:/keys
+
+  issuer:
+    build: ./python-tools
+    image: secretless-tools
+    command: ["python3", "/app/issuer.py"]
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    volumes:
+      - ./keys:/keys:ro
+    ports:
+      - "8099:8099"
+
+  mock-llm:
+    build: ./python-tools
+    image: secretless-tools
+    command: ["python3", "/app/mock_llm.py"]
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    environment:
+      # The provider's own copy of its key. Nothing else in the demo has it
+      # except agentgateway.
+      UPSTREAM_API_KEY: "sk-upstream-do-not-leak"
+    volumes:
+      - ./keys:/keys:ro
+    ports:
+      - "8088:8088"
+
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    command: ["-f", "/config/agentgateway.yaml"]
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    environment:
+      UPSTREAM_API_KEY: "sk-upstream-do-not-leak"
+    volumes:
+      - ./config:/config:ro
+      - ./keys:/keys:ro
+    ports:
+      - "3300:3300"    # LLM traffic
+      - "15000:15000"  # admin
+
+  # Sleeps so you can exec into it and see how little it holds.
+  agent:
+    build: ./python-tools
+    image: secretless-tools
+    command: ["sleep", "infinity"]
+    depends_on:
+      - agentgateway
+      - issuer
+    environment:
+      ISSUER_URL: http://issuer:8099
+      GATEWAY_URL: http://agentgateway:3300
+      UPSTREAM_URL: http://mock-llm:8088
