@@ -1,5 +1,7 @@
 # secretless-agents
 
+> 📖 **Read the write-up:** [Your AI Agent Should Not Hold the LLM API Key](https://webofmike.com/secretless-ai-agents/)
+
 An agent that calls an LLM without ever holding an LLM credential.
 
 The agent process has no API key in its environment, no key file on its
